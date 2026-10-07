@@ -219,7 +219,6 @@ async function runTest(job: Job<TestJobData>) {
   }
 
   const randomUUID = crypto.randomUUID();//Generate a uuid for this run
-  const steps = (test.steps as unknown as Step[]).map((step) => interpolateStep(step, variables, randomUUID));
   const dataCaseVariables = (runSnapshot.dataCaseVariables ?? {}) as Record<string, string>;
   const runtimeVariables = mergeRuntimeVariables(environmentVariables, dataCaseVariables);
   const isAuthRefresh = runSnapshot.runMode === 'AUTH_REFRESH';
@@ -228,7 +227,7 @@ async function runTest(job: Job<TestJobData>) {
     throw new Error(`Authentication refresh run ${testRunId} is missing its authentication profile.`);
   }
 
-  const steps = (test.steps as unknown as Step[]).map((step) => interpolateStep(step, runtimeVariables));
+  const steps = (test.steps as unknown as Step[]).map((step) => interpolateStep(step, runtimeVariables, randomUUID));
   const deviceConfig = test.device && test.device in devices ? devices[test.device as keyof typeof devices] : {};
 
   if (test.device && !(test.device in devices)) {

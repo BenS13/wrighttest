@@ -10,15 +10,7 @@ import StepEditor from '../components/StepEditor';
 import TestDataEditor from '../components/test-data/TestDataEditor';
 import VariableAutocompleteInput from '../components/VariableAutocompleteInput';
 import UserMenu from '../components/UserMenu';
-import type { Environment, Step, StepValidationResult, Test, StepAction } from '../types';
-
-const { Content } = Layout;
-const { Title, Text } = Typography;
-const Label = Form.Item;
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL ?? 'http://localhost:3000';
-const NOVNC_URL = import.meta.env.VITE_NOVNC_URL ?? 'http://localhost:6080';
-const ENABLE_NOVNC = import.meta.env.VITE_ENABLE_NOVNC !== 'false';
-import type { Environment, Step, StepValidationResult, Test } from '../types';
+import type { Environment, Step, StepAction, StepValidationResult, Test } from '../types';
 import {
   hasTestDataValidationErrors,
   getEnabledTestDataCaseOptions,
@@ -37,6 +29,7 @@ import { BACKEND_URL, ENABLE_NOVNC, NOVNC_URL } from '../utils/runtimeConfig';
 
 const { Content } = Layout;
 const { Title, Text } = Typography;
+const Label = Form.Item;
 
 function resolveNoVncWebsocketPath(baseUrl: string) {
   try {
@@ -778,10 +771,6 @@ export default function TestEditorPage() {
     setRecordLoading(true);
     try {
       const data = await startRecording(
-        url, 
-        recordingProjectId || currentProjectId || projectId || '', 
-        selectedRecordingEnvironmentId || undefined, 
-        device,
         url,
         recordingProjectId || currentProjectId || projectId || '',
         selectedRecordingEnvironmentId || undefined,
