@@ -23,10 +23,10 @@ import AppFooter from '../components/AppFooter';
 import UserMenu from '../components/UserMenu';
 import RunStatusBadge from '../components/RunStatusBadge';
 import type { RunStatus, StepAction, TestRun } from '../types';
+import { BACKEND_URL } from '../utils/runtimeConfig';
 
 const { Content } = Layout;
 const { Title, Text, Paragraph } = Typography;
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL ?? 'http://localhost:3000';
 
 type StepResultRow = {
   key: number;
@@ -241,6 +241,7 @@ export default function RunResultPage() {
       run.test?.name,
       run.test?.project?.name,
       run.environment?.name,
+      run.dataCaseName ? `Test data case: ${run.dataCaseName}` : undefined,
       run.test?.device,
       run.schedule?.name ?? 'Manual run'
     ].filter(Boolean) as string[];
@@ -252,8 +253,8 @@ export default function RunResultPage() {
     setRerunning(true);
     try {
       const nextRun = run.environmentId
-        ? await runTestWithEnvironment(run.testId, run.environmentId)
-        : await runTest(run.testId);
+        ? await runTestWithEnvironment(run.testId, run.environmentId, run.dataCaseIndex ?? undefined)
+        : await runTest(run.testId, run.dataCaseIndex ?? undefined);
       navigate(`/runs/${nextRun.testRunId}`);
     } finally {
       setRerunning(false);

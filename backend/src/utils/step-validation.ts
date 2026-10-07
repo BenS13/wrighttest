@@ -1,5 +1,16 @@
 import type { Step } from '../types/step';
 
+const ASSERTION_ACTIONS = new Set<Step['action']>([
+  'assertVisible',
+  'assertHidden',
+  'assertText',
+  'assertValue',
+  'assertURL',
+  'assertTitle',
+  'assertChecked',
+  'assertCount'
+]);
+
 export type StepRequirementIssue = {
   message: string;
   fields: Partial<Record<'selector' | 'value' | 'expected', string>>;
@@ -12,6 +23,14 @@ function required(field: string) {
 function buildIssue(fields: StepRequirementIssue['fields']): StepRequirementIssue | null {
   const message = fields.selector ?? fields.value ?? fields.expected;
   return message ? { message, fields } : null;
+}
+
+function hasValue(value: string | undefined | null) {
+  return value !== undefined && value !== null;
+}
+
+export function hasAssertionSteps(steps: Step[]) {
+  return steps.some((step) => ASSERTION_ACTIONS.has(step.action));
 }
 
 export function validateStepRequirements(step: Step): StepRequirementIssue | null {
@@ -33,7 +52,7 @@ export function validateStepRequirements(step: Step): StepRequirementIssue | nul
     case 'fill':
       return buildIssue({
         ...(step.selector?.trim() ? {} : { selector: required('Target') }),
-        ...(step.value?.trim() ? {} : { value: required('Value') })
+        ...(hasValue(step.value) ? {} : { value: required('Value') })
       });
     case 'press':
       return buildIssue({

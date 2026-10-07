@@ -5,7 +5,7 @@
 
 ![License](https://img.shields.io/badge/license-source--available-blue)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.x-blue)
-![Playwright](https://img.shields.io/badge/Playwright-1.59-green)
+![Playwright](https://img.shields.io/badge/Playwright-1.61-green)
 ![Docker](https://img.shields.io/badge/Docker-Compose-blue)
 [![Stars](https://img.shields.io/github/stars/AlexFilippov-it/wrighttest?style=social)](https://github.com/AlexFilippov-it/wrighttest/stargazers)
 [![Last Commit](https://img.shields.io/github/last-commit/AlexFilippov-it/wrighttest)](https://github.com/AlexFilippov-it/wrighttest/commits/main)
@@ -16,8 +16,9 @@
 - **Visual Recorder** - click through your app via noVNC, steps captured automatically
 - **Smart Locators** - uses `getByRole`, `getByLabel`, `href` instead of fragile CSS paths
 - **Assertions Builder** - `toBeVisible`, `toHaveText`, `toHaveURL` and more
-- **Mobile Testing** - emulate iPhone 15, Pixel 7, iPad and other devices
+- **Device Presets** - run desktop 1280px by default or emulate iPhone 15, Pixel 7, iPad and other devices
 - **Environments** - `{{BASE_URL}}`, `{{PASSWORD}}` replaced at runtime per environment
+- **Data-driven checks** - define named scenario cases, run one selected case, or queue all enabled cases as a batch
 - **Scheduler** - cron-based automatic runs with full history per schedule
 - **Suites** - group tests and run them with one click or on schedule
 - **Trace Viewer** - built-in Playwright trace viewer after every run
@@ -67,6 +68,60 @@ Default admin login is defined in `.env`:
 On an empty database the seed also creates a `Docker Demo` project with two sample tests, a `DEV` environment, a `Smoke Test` suite, and an hourly schedule.
 
 This path is the recommended first launch on any machine. The backend image is built on the Playwright-ready base image and includes the browser bundle, so no host browser or system library setup is required.
+
+## 🐳 Docker Hub Images
+
+WrightTest is a multi-container stack. Docker Hub publishes the WrightTest-owned application images, while PostgreSQL and Redis continue to use official upstream images:
+
+- `sacha1bu/wrighttest-backend`
+- `sacha1bu/wrighttest-frontend`
+- `sacha1bu/wrighttest-novnc`
+- `postgres:16-alpine`
+- `redis:7-alpine`
+
+WrightTest application images currently target `linux/amd64`. They run through Docker emulation on Apple Silicon, while amd64 VPS hosts run them natively.
+
+Run the published images without rebuilding locally:
+
+```bash
+git clone https://github.com/AlexFilippov-it/wrighttest.git
+cd wrighttest
+
+cp .env.example .env
+# Set JWT_SECRET to a long random string.
+
+docker compose -f docker-compose.hub.yml pull
+docker compose -f docker-compose.hub.yml up -d
+```
+
+Use `WRIGHTTEST_IMAGE_NAMESPACE` and `WRIGHTTEST_IMAGE_TAG` to select another Docker Hub namespace or version:
+
+```env
+WRIGHTTEST_IMAGE_NAMESPACE=sacha1bu
+WRIGHTTEST_IMAGE_TAG=0.2.0
+```
+
+The regular `docker-compose.yml` remains the source-of-truth development compose file and builds the same image names from the current Git checkout. `docker-compose.hub.yml` is the pull-only runtime variant for Docker Hub users.
+
+Publishing is automated by `.github/workflows/docker-publish.yml`:
+
+- publishing a GitHub Release such as `v0.2.0` publishes both `0.2.0` and `latest` for all three images;
+- a manual workflow run publishes the requested tag and can optionally update `latest` to the same image digest;
+- Docker Hub credentials are stored only in the `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` GitHub Actions secrets;
+- `DOCKERHUB_NAMESPACE` is configured as a GitHub Actions repository variable.
+
+Frontend URLs are runtime-configured in the container through:
+
+- `VITE_BACKEND_URL`
+- `VITE_NOVNC_URL`
+- `VITE_ENABLE_NOVNC`
+
+This keeps published frontend images reusable across localhost, VPS, and reverse-proxy deployments without rebuilding the frontend for each public URL.
+
+Docker image metadata includes OCI labels pointing back to:
+
+- https://wrighttest.com
+- https://github.com/AlexFilippov-it/wrighttest
 
 ## 🌐 Live Demo
 
@@ -247,6 +302,76 @@ docker compose up --build -d
   <img src="./docs/Screenshot_5.png" alt="Live browser recording" width="100%" />
 </p>
 <p align="center"><em>Live recording captures Playwright-ready selectors directly from the browser session.</em></p>
+
+## 🧪 Data-driven Checks
+
+WrightTest separates checks from test cases:
+
+- **Check** - one browser scenario: URL, device, and steps.
+- **Test case** - one named set of scenario variables for that check.
+- **Run** - one execution of one check with one selected test case.
+- **Run batch** - a grouped set of runs created by running all enabled test cases for one check.
+
+This means a project can show `Checks: 1` while that check contains multiple test cases. The check is counted once because the browser flow and steps are shared; each enabled case creates its own run when executed in a batch.
+
+Each test case has:
+
+- a human-readable name
+- an enabled/disabled state
+- scenario variables such as `EMAIL`, `PASS`, `EXPECTED_MESSAGE`, or `EXPECTED_URL`
+
+All variables are equal: they can describe form input, expected results, URLs, titles, search text, order numbers, or any other scenario value. Use them in the Start URL or step fields with the same `{{VARIABLE}}` syntax used by environments.
+
+Example case:
+
+```text
+Wrong password
+EMAIL=admin@test.com
+PASS=123456
+EXPECTED_MESSAGE=Invalid email or password
+EXPECTED_URL=https://demo.wrighttest.com/login
+```
+
+Example steps:
+
+```text
+Fill {{EMAIL}}
+Fill {{PASS}}
+Assert text {{EXPECTED_MESSAGE}}
+Assert URL {{EXPECTED_URL}}
+```
+
+For manual runs in the editor, select the case in **Check settings** next to the Environment selector, then run the check. If more than one case is enabled, use **Run all enabled cases** to queue a batch. Each case in that batch creates a separate `TestRun`, keeps its own variable snapshot, screenshots, trace, error, and step results, and runs through the existing worker.
+
+On the project checks page, **Run** is data-aware: checks with one enabled case start a normal run; checks with multiple enabled cases queue a batch and open the batch result page.
+
+WrightTest combines variables from the selected environment with variables from the selected test data case for that run. Test data case variables take precedence when the same variable name exists in both places. Empty strings are valid values, so a case can intentionally define `EMAIL=`.
+
+Disabled cases are ignored by run actions and do not block variable diagnostics.
+
+This keeps ordinary checks unchanged: if a check has no test data, it runs exactly as before.
+
+## 🔐 Reusable Authentication
+
+WrightTest can reuse encrypted Playwright authentication state separately for each project environment. Login refreshes run in a clean browser context, failed refreshes preserve the last working state, and regular runs, validation, and recording start in fresh isolated contexts loaded with that state.
+
+See [Project-level reusable authentication with Playwright storageState](https://github.com/AlexFilippov-it/wrighttest/discussions/4#discussioncomment-18757806) for the setup steps, security model, refresh behavior, and current MVP scope.
+
+## 🖥 Devices
+
+If no device is selected, WrightTest uses the default desktop browser context (`1280x720`). The device selector only stores explicit overrides such as:
+
+- `Desktop 1280px`
+- `Desktop 1920px (HiDPI)`
+- mobile and tablet presets from Playwright
+
+There is no separate saved value for "Desktop default"; leaving the selector empty is the default desktop mode.
+
+<p align="center">
+  <img src="./docs/Screenshot_7.png" alt="Test data editor" width="49%" />
+  <img src="./docs/Screenshot_8.png" alt="Selecting a test data case for a manual run" width="49%" />
+</p>
+<p align="center"><em>Create named data cases in the check editor, then select the enabled case to use for a manual run.</em></p>
 
 ## 📦 Export Playwright Project
 

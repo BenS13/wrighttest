@@ -6,6 +6,7 @@ import type {
   NotificationChannelType,
   Project,
   ProjectMember,
+  ProjectAuthProfile,
   ProjectWorkspace,
   ProjectSummary,
   Schedule,
@@ -14,12 +15,24 @@ import type {
   Step,
   Test,
   TestRun,
+  TestRunBatch,
   RunsResponse,
   ValidationReport
 } from '../types';
+import { BACKEND_URL } from '../utils/runtimeConfig';
+
+export type TestPayload = {
+  name: string;
+  url: string;
+  steps: Step[];
+  testData?: Test['testData'];
+  device?: string | null;
+  environmentId?: string | null;
+  useProjectAuthentication?: boolean;
+};
 
 export const api = axios.create({
-  baseURL: import.meta.env.VITE_BACKEND_URL ?? 'http://localhost:3000'
+  baseURL: BACKEND_URL
 });
 
 export const getProjects = () =>
@@ -168,6 +181,23 @@ export const updateEnvironment = (
 export const deleteEnvironment = (id: string) =>
   api.delete(`/environments/${id}`);
 
+export const getProjectAuthProfiles = (projectId: string) =>
+  api.get<ProjectAuthProfile[]>(`/projects/${projectId}/authentication`).then((r) => r.data);
+
+export const configureProjectAuthProfile = (
+  projectId: string,
+  environmentId: string,
+  data: { authCheckId: string; enabled: boolean }
+) => api.put<ProjectAuthProfile>(`/projects/${projectId}/authentication/${environmentId}`, data).then((r) => r.data);
+
+export const refreshProjectAuthentication = (projectId: string, environmentId: string) =>
+  api.post<{ authStateId: string; testRunId: string; jobId?: string; status: 'REFRESHING' }>(
+    `/projects/${projectId}/authentication/${environmentId}/refresh`
+  ).then((r) => r.data);
+
+export const deleteProjectAuthProfile = (projectId: string, environmentId: string) =>
+  api.delete(`/projects/${projectId}/authentication/${environmentId}`);
+
 export const getChannels = (projectId: string) =>
   api.get<NotificationChannel[]>(`/projects/${projectId}/channels`).then((r) => r.data);
 
@@ -213,10 +243,10 @@ export const testChannelDraft = (
 
 export const createTest = (
   projectId: string,
-  data: Omit<Test, 'id' | 'projectId' | 'createdAt' | '_count'>
+  data: TestPayload
 ) => api.post<Test>(`/projects/${projectId}/tests`, data).then((r) => r.data);
 
-export const updateTest = (id: string, data: Partial<Test>) =>
+export const updateTest = (id: string, data: Partial<TestPayload>) =>
   api.patch<Test>(`/tests/${id}`, data).then((r) => r.data);
 
 export const getTest = (id: string) =>
@@ -228,15 +258,39 @@ export const deleteTest = (id: string) =>
 export const importTestSpec = (projectId: string, code: string, name?: string) =>
   api.post<{ test: Test; parsedSteps: number }>(`/projects/${projectId}/import`, { code, name }).then((r) => r.data);
 
-export const runTest = (testId: string) =>
+export const runTest = (testId: string, dataCaseIndex?: number) =>
   api
-    .post<{ testRunId: string; jobId?: string; status: string }>(`/tests/${testId}/run`)
+    .post<{ testRunId: string; jobId?: string; status: string }>(
+      `/tests/${testId}/run`,
+      dataCaseIndex === undefined ? {} : { dataCaseIndex }
+    )
     .then((r) => r.data);
 
-export const runTestWithEnvironment = (testId: string, environmentId?: string) =>
+export const runTestWithEnvironment = (testId: string, environmentId?: string, dataCaseIndex?: number) =>
   api
     .post<{ testRunId: string; jobId?: string; status: string }>(`/tests/${testId}/run`, {
-      environmentId
+      ...(environmentId ? { environmentId } : {}),
+      ...(dataCaseIndex === undefined ? {} : { dataCaseIndex })
+    })
+    .then((r) => r.data);
+
+export const runAllEnabledTestCases = (testId: string, environmentId?: string) =>
+  api
+    .post<{
+      batchId: string;
+      testId: string;
+      totalCases: number;
+      queued: number;
+      runs: Array<{
+        id: string;
+        testRunId: string;
+        jobId?: string;
+        dataCaseName: string;
+        dataCaseIndex: number;
+        batchOrder: number;
+      }>;
+    }>(`/tests/${testId}/runs/all-cases`, {
+      ...(environmentId ? { environmentId } : {})
     })
     .then((r) => r.data);
 
@@ -252,23 +306,42 @@ export const triggerWebhook = (payload: {
 export const getRun = (runId: string) =>
   api.get<TestRun>(`/runs/${runId}`).then((r) => r.data);
 
+export const getRunBatch = (batchId: string) =>
+  api.get<TestRunBatch>(`/run-batches/${batchId}`).then((r) => r.data);
+
 export const getTestRuns = (testId: string) =>
   api.get<TestRun[]>(`/tests/${testId}/runs`).then((r) => r.data);
 
-export const validateTestSteps = (projectId: string, url: string, steps: Step[], device?: string | null) =>
+export const validateTestSteps = (
+  projectId: string,
+  url: string,
+  steps: Step[],
+  device?: string | null,
+  environmentId?: string,
+  useProjectAuthentication = true
+) =>
   api.post<ValidationReport>('/tests/validate', {
     projectId,
     url,
     steps,
-    device: device || undefined
+    device: device || undefined,
+    environmentId,
+    useProjectAuthentication
   }).then((r) => r.data);
 
-export const startRecording = (url: string, projectId: string, environmentId?: string, device?: string) =>
+export const startRecording = (
+  url: string,
+  projectId: string,
+  environmentId?: string,
+  device?: string,
+  useProjectAuthentication = false
+) =>
   api.post<{ sessionId: string; status: string }>('/recordings/start', {
     url,
     projectId,
     environmentId,
-    device
+    device,
+    useProjectAuthentication
   }).then((r) => r.data);
 
 export const stopRecording = (sessionId: string) =>

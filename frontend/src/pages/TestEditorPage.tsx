@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Breadcrumb, Button, Card, Col, Dropdown, Form, Input, Layout, Modal, Radio, Row, Select, Space, Tag, Typography, message, notification } from 'antd';
+import { Alert, Breadcrumb, Button, Card, Checkbox, Col, Dropdown, Form, Input, Layout, Modal, Radio, Row, Select, Space, Tag, Typography, message, notification } from 'antd';
 import type { MenuProps } from 'antd';
 import { DownOutlined, DownloadOutlined, PlayCircleOutlined, StopOutlined, VideoCameraOutlined, WarningOutlined } from '@ant-design/icons';
 import { useNavigate, useParams, Link } from 'react-router-dom';
-import { api, createTest, getDevices, getEnvironments, getProject, getTest, startRecording, stopRecording, updateTest, validateTestSteps, runTestWithEnvironment } from '../api/client';
+import { api, createTest, getDevices, getEnvironments, getProject, getTest, startRecording, stopRecording, updateTest, validateTestSteps, runTestWithEnvironment, runAllEnabledTestCases } from '../api/client';
 import AppHeader from '../components/AppHeader';
 import AppFooter from '../components/AppFooter';
 import StepEditor from '../components/StepEditor';
+import TestDataEditor from '../components/test-data/TestDataEditor';
 import VariableAutocompleteInput from '../components/VariableAutocompleteInput';
 import UserMenu from '../components/UserMenu';
 import type { Environment, Step, StepValidationResult, Test, StepAction } from '../types';
@@ -17,6 +18,25 @@ const Label = Form.Item;
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL ?? 'http://localhost:3000';
 const NOVNC_URL = import.meta.env.VITE_NOVNC_URL ?? 'http://localhost:6080';
 const ENABLE_NOVNC = import.meta.env.VITE_ENABLE_NOVNC !== 'false';
+import type { Environment, Step, StepValidationResult, Test } from '../types';
+import {
+  hasTestDataValidationErrors,
+  getEnabledTestDataCaseOptions,
+  shouldBlockRunForTestData,
+  toApiTestData,
+  toEditableTestData,
+  validateEditableTestData,
+  type EditableTestDataCase
+} from '../utils/testData';
+import {
+  buildTemplateVariablesDiagnostics,
+  getBlockingTemplateVariableErrorsForCase
+} from '../utils/templateVariables';
+import { normalizeDeviceForPayload } from '../utils/testPayload';
+import { BACKEND_URL, ENABLE_NOVNC, NOVNC_URL } from '../utils/runtimeConfig';
+
+const { Content } = Layout;
+const { Title, Text } = Typography;
 
 function resolveNoVncWebsocketPath(baseUrl: string) {
   try {
@@ -34,15 +54,56 @@ function collectVariableNames(environments: Environment[]) {
   ).sort((a, b) => a.localeCompare(b));
 }
 
-function extractVariableNames(value: string | null | undefined) {
-  if (!value) return [] as string[];
-  const names: string[] = [];
-  const re = /\{\{(\w+)\}\}/g;
-  let match: RegExpExecArray | null;
-  while ((match = re.exec(value)) !== null) {
-    names.push(match[1]);
+function normalizeTestData(test?: Partial<Test> | null) {
+  return Array.isArray(test?.testData) ? test.testData : [];
+}
+
+function getSaveErrorMessage(error: unknown) {
+  if (error && typeof error === 'object' && 'errorFields' in error) {
+    return 'Fix the highlighted fields before saving.';
   }
-  return names;
+
+  if (error && typeof error === 'object' && 'response' in error) {
+    const responseData = (error as {
+      response?: {
+        data?: {
+          error?: string | { fieldErrors?: Record<string, string[]> };
+          message?: string;
+        };
+      };
+    }).response?.data;
+
+    if (typeof responseData?.error === 'string') return responseData.error;
+    if (responseData?.error && typeof responseData.error === 'object') {
+      const fieldError = Object.values(responseData.error.fieldErrors ?? {}).flat().find(Boolean);
+      if (fieldError) return fieldError;
+    }
+    if (responseData?.message) return responseData.message;
+  }
+
+  return error instanceof Error ? error.message : 'Failed to save check.';
+}
+
+function selectedDataCaseStorageKey(testId: string) {
+  return `wrighttest:selected-data-case:${testId}`;
+}
+
+function readSelectedDataCaseIndex(testId: string, testData: Test['testData']) {
+  const raw = window.localStorage.getItem(selectedDataCaseStorageKey(testId));
+  if (raw === null) return undefined;
+  const value = Number(raw);
+  if (!Number.isInteger(value)) return undefined;
+  return testData[value]?.enabled ? value : undefined;
+}
+
+function writeSelectedDataCaseIndex(testId: string, value: number | undefined) {
+  const key = selectedDataCaseStorageKey(testId);
+  if (value === undefined) {
+    window.localStorage.removeItem(key);
+    return;
+  }
+
+  window.localStorage.setItem(key, String(value));
 }
 
 type StepIssue = {
@@ -76,7 +137,7 @@ function validateRequiredStepFields(step: Step): StepIssue | null {
     case 'fill':
       return buildStepIssue({
         ...(step.selector?.trim() ? {} : { selector: 'Target is required.' }),
-        ...(step.value?.trim() ? {} : { value: 'Value is required.' })
+        ...(step.value !== undefined && step.value !== null ? {} : { value: 'Value is required.' })
       });
     case 'press':
       return buildStepIssue({
@@ -197,6 +258,7 @@ export default function TestEditorPage() {
   const [recordEnvironments, setRecordEnvironments] = useState<Environment[]>([]);
   const [environmentVariableNames, setEnvironmentVariableNames] = useState<string[]>([]);
   const [selectedRecordingEnvironmentId, setSelectedRecordingEnvironmentId] = useState<string | undefined>(undefined);
+  const [useProjectAuthentication, setUseProjectAuthentication] = useState(true);
   const [recordingUrlHasTemplate, setRecordingUrlHasTemplate] = useState(false);
   const [recordLoading, setRecordLoading] = useState(false);
   const [validationResults, setValidationResults] = useState<StepValidationResult[] | undefined>();
@@ -216,6 +278,9 @@ export default function TestEditorPage() {
   const [initialSnapshotReady, setInitialSnapshotReady] = useState(false);
   const [selectedStepIndices, setSelectedStepIndices] = useState<Set<number>>(new Set());
   const [showStepSelection, setShowStepSelection] = useState(false);
+  const [useTestData, setUseTestData] = useState(false);
+  const [editableTestData, setEditableTestData] = useState<EditableTestDataCase[]>([]);
+  const [selectedDataCaseIndex, setSelectedDataCaseIndex] = useState<number | undefined>(undefined);
   const stepsRef = useRef<Step[]>([]);
   const initialSnapshotRef = useRef<string>('');
   const navigate = useNavigate();
@@ -245,10 +310,14 @@ export default function TestEditorPage() {
     if (!testId) {
       form.setFieldsValue({ name: '', url: '', device: undefined });
       stepsRef.current = [{ action: 'goto', value: '' }];
+      setUseTestData(false);
+      setEditableTestData([]);
+      setSelectedDataCaseIndex(undefined);
       setSteps(stepsRef.current);
       setRecordingProjectId(projectId);
       setCurrentProjectId(projectId);
       setSelectedRecordingEnvironmentId(undefined);
+      setUseProjectAuthentication(true);
       setValidationTracePath(undefined);
       setValidationFeedback(null);
       setStepIssues([]);
@@ -260,10 +329,15 @@ export default function TestEditorPage() {
     void getTest(testId).then((test) => {
       form.setFieldsValue({ name: test.name, url: test.url, device: test.device ?? undefined });
       stepsRef.current = test.steps.length > 0 ? test.steps : [{ action: 'goto', value: '' }];
+      const existingTestData = normalizeTestData(test);
+      setUseTestData(existingTestData.length > 0);
+      setEditableTestData(toEditableTestData(existingTestData));
+      setSelectedDataCaseIndex(readSelectedDataCaseIndex(test.id, existingTestData));
       setSteps(stepsRef.current);
       setRecordingProjectId(test.projectId);
       setCurrentProjectId(test.projectId);
       setSelectedRecordingEnvironmentId(test.environmentId ?? undefined);
+      setUseProjectAuthentication(test.useProjectAuthentication ?? true);
       void getProject(test.projectId)
         .then((project) => setCurrentProjectRole(project.currentUserRole ?? null))
         .catch(() => setCurrentProjectRole(null));
@@ -373,9 +447,11 @@ export default function TestEditorPage() {
     try {
       const payload = {
         ...values,
-        device: form.getFieldValue('device') || undefined,
+        device: normalizeDeviceForPayload(values.device),
         environmentId: selectedRecordingEnvironmentId ?? null,
-        steps: stepsToSave
+        useProjectAuthentication,
+        steps: stepsToSave,
+        testData: currentApiTestData
       };
 
       if (isEdit) {
@@ -427,7 +503,14 @@ export default function TestEditorPage() {
 
     setValidating(true);
     try {
-      const report = await validateTestSteps(currentProjectId ?? projectId ?? '', values.url, currentSteps, values.device);
+      const report = await validateTestSteps(
+        currentProjectId ?? projectId ?? '',
+        values.url,
+        currentSteps,
+        values.device,
+        selectedRecordingEnvironmentId,
+        useProjectAuthentication
+      );
       setValidationResults(report.results);
       setValidationTracePath(report.tracePath);
       if (report.tracePath) {
@@ -516,6 +599,24 @@ export default function TestEditorPage() {
       message.warning('Add at least one step before running');
       return;
     }
+    if (hasTestDataErrors) {
+      message.error('Fix test data errors before running');
+      return;
+    }
+    if (shouldBlockDataCaseRun) {
+      message.error(dataCaseOptions.length === 0
+        ? 'Enable at least one test data case before running this test.'
+        : 'Select a test data case before running this test.');
+      return;
+    }
+    const effectiveDataCaseIndex = dataCaseOptions.length === 1
+      ? dataCaseOptions[0].value
+      : selectedDataCaseIndex;
+    const selectedCaseDiagnosticsErrors = getBlockingTemplateVariableErrorsForCase(templateDiagnostics, effectiveDataCaseIndex);
+    if (selectedCaseDiagnosticsErrors.length > 0) {
+      message.error(selectedCaseDiagnosticsErrors[0]);
+      return;
+    }
 
     const prepared = await validateAndPrepareSteps(values);
     if (!prepared) return;
@@ -523,7 +624,10 @@ export default function TestEditorPage() {
     setSaving(true);
     try {
       const saved = await persistTest(values, prepared.fixedSteps, false);
-      const run = await runTestWithEnvironment(saved.id, selectedRecordingEnvironmentId);
+      writeSelectedDataCaseIndex(saved.id, effectiveDataCaseIndex);
+      const savedTestData = normalizeTestData(saved);
+      const runDataCaseIndex = savedTestData.length > 0 ? effectiveDataCaseIndex : undefined;
+      const run = await runTestWithEnvironment(saved.id, selectedRecordingEnvironmentId, runDataCaseIndex);
       navigate(`/runs/${run.testRunId}`);
     } catch (error) {
       const responseError =
@@ -534,6 +638,63 @@ export default function TestEditorPage() {
         responseError?.error ??
         responseError?.message ??
         'Validation failed';
+
+      setValidationFeedback({
+        type: 'error',
+        text: validationMessage
+      });
+      message.error(validationMessage);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleRunAllEnabledCases = async () => {
+    if (isReadOnly) {
+      message.warning('Read-only access');
+      return;
+    }
+
+    const values = {
+      ...(await form.validateFields()),
+      device: form.getFieldValue('device') || undefined
+    };
+    if (steps.length === 0) {
+      message.warning('Add at least one step before running');
+      return;
+    }
+    if (hasTestDataErrors) {
+      message.error('Fix test data errors before running');
+      return;
+    }
+    if (templateDiagnostics.errors.length > 0) {
+      message.error(templateDiagnostics.errors[0]);
+      return;
+    }
+    if (dataCaseOptions.length <= 1) {
+      message.warning('Add at least two enabled test data cases first');
+      return;
+    }
+
+    const prepared = await validateAndPrepareSteps(values);
+    if (!prepared) return;
+
+    setSaving(true);
+    try {
+      const saved = await persistTest(values, prepared.fixedSteps, false);
+      writeSelectedDataCaseIndex(saved.id, selectedDataCaseIndex);
+      const result = await runAllEnabledTestCases(saved.id, selectedRecordingEnvironmentId);
+      message.success(`${result.queued} test cases queued.`);
+      navigate(`/run-batches/${result.batchId}`);
+    } catch (error) {
+      const responseError =
+        error && typeof error === 'object' && 'response' in error
+          ? (error as { response?: { data?: { error?: string; message?: string } } }).response?.data
+          : undefined;
+      const validationMessage =
+        responseError?.error ??
+        responseError?.message ??
+        'Failed to queue test data cases';
 
       setValidationFeedback({
         type: 'error',
@@ -588,7 +749,13 @@ export default function TestEditorPage() {
         }
       }
 
-      const data = await startRecording(url, recordingProjectId || currentProjectId || projectId || '', undefined, device);
+      const data = await startRecording(
+        url,
+        recordingProjectId || currentProjectId || projectId || '',
+        undefined,
+        device,
+        useProjectAuthentication
+      );
       setSessionId(data.sessionId);
       setRecording(true);
       setRecordModalOpen(false);
@@ -615,6 +782,11 @@ export default function TestEditorPage() {
         recordingProjectId || currentProjectId || projectId || '', 
         selectedRecordingEnvironmentId || undefined, 
         device,
+        url,
+        recordingProjectId || currentProjectId || projectId || '',
+        selectedRecordingEnvironmentId || undefined,
+        device,
+        useProjectAuthentication
       );
       setSessionId(data.sessionId);
       setRecording(true);
@@ -712,21 +884,68 @@ export default function TestEditorPage() {
       return;
     }
 
-    const values = {
-      ...(await form.validateFields()),
-      device: form.getFieldValue('device') || undefined
-    };
-    const currentSteps = stepsRef.current;
-    if (currentSteps.length === 0) {
-      const saved = await saveTest(values, currentSteps);
+    try {
+      const values = {
+        ...(await form.validateFields()),
+        device: form.getFieldValue('device') || undefined
+      };
+      if (hasTestDataErrors) {
+        message.error('Fix test data errors before saving');
+        return;
+      }
+      if (templateDiagnostics.errors.length > 0) {
+        message.error(templateDiagnostics.errors[0]);
+        return;
+      }
+      const currentSteps = stepsRef.current;
+      if (currentSteps.length === 0) {
+        const saved = await saveTest(values, currentSteps);
+        form.setFieldsValue({ name: saved.name, url: saved.url, device: saved.device ?? undefined });
+        const nextProjectId = saved.projectId ?? currentProjectId ?? projectId;
+        setCurrentProjectId(nextProjectId);
+        writeSelectedDataCaseIndex(saved.id, selectedDataCaseIndex);
+        initialSnapshotRef.current = JSON.stringify({
+          name: saved.name,
+          url: saved.url,
+          device: saved.device ?? null,
+          environmentId: saved.environmentId ?? null,
+          useProjectAuthentication: saved.useProjectAuthentication,
+          testData: normalizeTestData(saved),
+          selectedDataCaseIndex: selectedDataCaseIndex ?? null,
+          steps: currentSteps
+        });
+        setValidationFeedback({
+          type: 'success',
+          text: isEdit ? 'Check updated successfully.' : 'Check created successfully.'
+        });
+        message.success(isEdit ? 'Check updated' : 'Check created');
+        if (nextProjectId) {
+          navigate(`/projects/${nextProjectId}`);
+        } else {
+          navigate('/projects');
+        }
+        return;
+      }
+
+      const prepared = await validateAndPrepareSteps(values);
+      if (!prepared) return;
+
+      stepsRef.current = prepared.fixedSteps;
+      setSteps(prepared.fixedSteps);
+      const saved = await saveTest(values, prepared.fixedSteps);
+      form.setFieldsValue({ name: saved.name, url: saved.url, device: saved.device ?? undefined });
       const nextProjectId = saved.projectId ?? currentProjectId ?? projectId;
       setCurrentProjectId(nextProjectId);
+      writeSelectedDataCaseIndex(saved.id, selectedDataCaseIndex);
       initialSnapshotRef.current = JSON.stringify({
         name: saved.name,
         url: saved.url,
         device: saved.device ?? null,
         environmentId: saved.environmentId ?? null,
-        steps: currentSteps
+        useProjectAuthentication: saved.useProjectAuthentication,
+        testData: normalizeTestData(saved),
+        selectedDataCaseIndex: selectedDataCaseIndex ?? null,
+        steps: prepared.fixedSteps
       });
       setValidationFeedback({
         type: 'success',
@@ -738,39 +957,16 @@ export default function TestEditorPage() {
       } else {
         navigate('/projects');
       }
-      return;
-    }
-
-    const prepared = await validateAndPrepareSteps(values);
-    if (!prepared) return;
-
-    stepsRef.current = prepared.fixedSteps;
-    setSteps(prepared.fixedSteps);
-    const saved = await saveTest(values, prepared.fixedSteps);
-    const nextProjectId = saved.projectId ?? currentProjectId ?? projectId;
-    setCurrentProjectId(nextProjectId);
-    initialSnapshotRef.current = JSON.stringify({
-      name: saved.name,
-      url: saved.url,
-      device: saved.device ?? null,
-      environmentId: saved.environmentId ?? null,
-      steps: prepared.fixedSteps
-    });
-    setValidationFeedback({
-      type: 'success',
-      text: isEdit ? 'Check updated successfully.' : 'Check created successfully.'
-    });
-    message.success(isEdit ? 'Check updated' : 'Check created');
-    if (nextProjectId) {
-      navigate(`/projects/${nextProjectId}`);
-    } else {
-      navigate('/projects');
+    } catch (error) {
+      const saveError = getSaveErrorMessage(error);
+      setValidationFeedback({ type: 'error', text: saveError });
+      message.error(saveError);
     }
   };
 
   const getDeviceLabel = () => {
     const value = selectedDevice;
-    if (!value) return 'Desktop';
+    if (!value) return 'Desktop 1280px';
     return deviceOptions.find((device) => device.value === value)?.label ?? value;
   };
 
@@ -810,32 +1006,67 @@ export default function TestEditorPage() {
     </Tag>
   ];
 
-  const selectedVariables = Array.from(
-    new Set([
-      ...extractVariableNames(selectedUrl),
-      ...steps.flatMap((step) => [
-        ...extractVariableNames(step.selector),
-        ...extractVariableNames(step.value),
-        ...extractVariableNames(step.expected)
-      ])
-    ])
+  const currentApiTestData = useMemo(
+    () => toApiTestData(editableTestData, useTestData),
+    [editableTestData, useTestData]
   );
-  const variableWarning =
-    !selectedRecordingEnvironmentId && selectedVariables.length > 0
-      ? `This check uses ${selectedVariables.map((name) => `{{${name}}}`).join(', ')}, but no environment is selected.`
-      : null;
-
+  const selectedEnvironment = useMemo(
+    () => recordEnvironments.find((environment) => environment.id === selectedRecordingEnvironmentId) ?? null,
+    [recordEnvironments, selectedRecordingEnvironmentId]
+  );
+  const templateDiagnostics = useMemo(
+    () => buildTemplateVariablesDiagnostics({
+      useTestData,
+      url: selectedUrl,
+      steps,
+      testData: currentApiTestData,
+      selectedEnvironment
+    }),
+    [useTestData, selectedUrl, steps, currentApiTestData, selectedEnvironment]
+  );
   const currentSnapshot = useMemo(
     () =>
       JSON.stringify({
         name: checkName ?? '',
         url: selectedUrl ?? '',
-        device: selectedDevice ?? null,
+        device: normalizeDeviceForPayload(selectedDevice),
         environmentId: selectedRecordingEnvironmentId ?? null,
+        useProjectAuthentication,
+        testData: currentApiTestData,
+        selectedDataCaseIndex: selectedDataCaseIndex ?? null,
         steps
       }),
-    [checkName, selectedUrl, selectedDevice, selectedRecordingEnvironmentId, steps]
+    [checkName, selectedUrl, selectedDevice, selectedRecordingEnvironmentId, useProjectAuthentication, currentApiTestData, selectedDataCaseIndex, steps]
   );
+
+  const dataCaseOptions = useMemo(
+    () => getEnabledTestDataCaseOptions(currentApiTestData),
+    [currentApiTestData]
+  );
+  const effectiveSelectedDataCaseIndex = dataCaseOptions.length === 1
+    ? dataCaseOptions[0].value
+    : selectedDataCaseIndex;
+  const shouldBlockDataCaseRun = shouldBlockRunForTestData(currentApiTestData, effectiveSelectedDataCaseIndex);
+  const selectedCaseTemplateErrors = useMemo(
+    () => getBlockingTemplateVariableErrorsForCase(templateDiagnostics, effectiveSelectedDataCaseIndex),
+    [templateDiagnostics, effectiveSelectedDataCaseIndex]
+  );
+  const shouldBlockSelectedCaseRun = shouldBlockDataCaseRun || selectedCaseTemplateErrors.length > 0;
+  const shouldBlockRunAllCases = templateDiagnostics.errors.length > 0;
+  const enabledCasesCount = dataCaseOptions.length;
+  const testDataErrors = useMemo(
+    () => validateEditableTestData(editableTestData, useTestData),
+    [editableTestData, useTestData]
+  );
+  const hasTestDataErrors = hasTestDataValidationErrors(testDataErrors);
+
+  useEffect(() => {
+    if (selectedDataCaseIndex === undefined) return;
+    const stillEnabled = dataCaseOptions.some((option) => option.value === selectedDataCaseIndex);
+    if (!stillEnabled) {
+      setSelectedDataCaseIndex(undefined);
+    }
+  }, [dataCaseOptions, selectedDataCaseIndex]);
 
   useEffect(() => {
     if (!initialSnapshotReady) return;
@@ -891,7 +1122,6 @@ export default function TestEditorPage() {
       </Button>
     </Dropdown>
   );
-
   return (
     <Layout style={{ minHeight: '100vh', background: 'linear-gradient(135deg, #f8fafc 0%, #eef2ff 50%, #ffffff 100%)' }}>
       {confirmModalContextHolder}
@@ -911,10 +1141,12 @@ export default function TestEditorPage() {
                     ]}
                   />
                   <Title level={2} style={{ margin: 0 }}>
-                    Edit Check
+                    {isEdit ? 'Edit Check' : 'New Check'}
                   </Title>
                   <Text type="secondary" style={{ maxWidth: 760 }}>
-                    Update the browser flow, target, device, and assertions for this check.
+                    {isEdit
+                      ? 'Update the browser flow, target, device, and assertions for this check.'
+                      : 'Create a browser flow, choose a target and device, and add result assertions.'}
                   </Text>
                   {isReadOnly && (
                     <Alert
@@ -928,15 +1160,20 @@ export default function TestEditorPage() {
                 </div>
 
                 <Space wrap align="center">
-                  <Button icon={<PlayCircleOutlined />} onClick={() => void handleRunCheck()} disabled={isReadOnly}>
+                  <Button icon={<PlayCircleOutlined />} onClick={() => void handleRunCheck()} disabled={isReadOnly || hasTestDataErrors || shouldBlockSelectedCaseRun}>
                     Run check
                   </Button>
+                  {dataCaseOptions.length > 1 && (
+                    <Button icon={<PlayCircleOutlined />} onClick={() => void handleRunAllEnabledCases()} disabled={isReadOnly || hasTestDataErrors || shouldBlockRunAllCases || saving || validating}>
+                      Run all enabled cases
+                    </Button>
+                  )}
                   <Button icon={<VideoCameraOutlined />} onClick={handleStartRecording} disabled={isReadOnly}>
                     Start recording
                   </Button>
                   {exportTrigger}
-                  <Button type="primary" loading={saving || validating} disabled={isReadOnly || !isDirty || saving || validating} onClick={handleValidateAndSave}>
-                    Save changes
+                  <Button type="primary" loading={saving || validating} disabled={isReadOnly || !isDirty || saving || validating || hasTestDataErrors || shouldBlockRunAllCases} onClick={handleValidateAndSave}>
+                    {isEdit ? 'Save changes' : 'Create check'}
                   </Button>
                 </Space>
           </div>
@@ -964,11 +1201,12 @@ export default function TestEditorPage() {
                     >
                       <Select
                         allowClear
-                        placeholder="Desktop (default)"
+                        disabled={isReadOnly}
+                        placeholder="Desktop 1280px by default"
                         options={[
                           {
                             label: 'Desktop',
-                            options: deviceOptions.filter((device) => !device.value || device.label.startsWith('Desktop'))
+                            options: deviceOptions.filter((device) => device.value && device.label.startsWith('Desktop'))
                           },
                           {
                             label: 'iPhone / iPad',
@@ -1012,7 +1250,7 @@ export default function TestEditorPage() {
                       />
                     </Form.Item>
                   </Col>
-                  <Col span={24}>
+                  <Col xs={24} lg={currentApiTestData.length > 0 ? 12 : 24}>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 8, width: '100%' }}>
                       <Text type="secondary">Environment</Text>
                       <Select
@@ -1032,19 +1270,60 @@ export default function TestEditorPage() {
                       </Text>
                     </div>
                   </Col>
-                  {variableWarning && (
-                    <Col span={24}>
-                      <Alert
-                        type="warning"
-                        showIcon
-                        message={variableWarning}
-                        style={{ borderRadius: 12 }}
-                      />
+                  <Col span={24}>
+                    <Space direction="vertical" size={4}>
+                      <Checkbox
+                        checked={useProjectAuthentication}
+                        disabled={isReadOnly}
+                        onChange={(event) => setUseProjectAuthentication(event.target.checked)}
+                      >
+                        Use reusable project authentication for this environment
+                      </Checkbox>
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        Disable this for login, logout, registration, password reset, and guest checks that must start unauthenticated.
+                      </Text>
+                    </Space>
+                  </Col>
+                  {currentApiTestData.length > 0 && (
+                    <Col xs={24} lg={12}>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, width: '100%' }}>
+                        <Text type="secondary">Test data case</Text>
+                        <Select
+                          placeholder={dataCaseOptions.length > 0 ? 'Select case' : 'No enabled cases'}
+                          value={effectiveSelectedDataCaseIndex}
+                          options={dataCaseOptions}
+                          onChange={(value) => setSelectedDataCaseIndex(value)}
+                          disabled={isReadOnly || dataCaseOptions.length === 0}
+                          style={{ width: '100%' }}
+                        />
+                        {dataCaseOptions.length === 0 ? (
+                          <Text type="danger" style={{ fontSize: 12 }}>
+                            Enable at least one test data case before running this test.
+                          </Text>
+                        ) : (
+                          <Text type="secondary" style={{ fontSize: 12 }}>
+                            Selected case variables are used for manual runs.
+                          </Text>
+                        )}
+                      </div>
                     </Col>
                   )}
                 </Row>
               </Form>
             </Card>
+          </Col>
+
+          <Col span={24}>
+            <TestDataEditor
+              useTestData={useTestData}
+              cases={editableTestData}
+              errors={testDataErrors}
+              diagnostics={useTestData ? templateDiagnostics : undefined}
+              enabledCasesCount={enabledCasesCount}
+              readOnly={isReadOnly}
+              onUseTestDataChange={setUseTestData}
+              onCasesChange={setEditableTestData}
+            />
           </Col>
 
           <Col span={24}>
@@ -1074,7 +1353,7 @@ export default function TestEditorPage() {
                       <Button onClick={() => setSteps((current) => [...current, { action: 'goto', value: '' }])} disabled={isReadOnly}>
                         Add step
                       </Button>
-                      <Button type="primary" icon={<PlayCircleOutlined />} onClick={() => void handleRunCheck()} disabled={isReadOnly || saving || validating}>
+                      <Button type="primary" icon={<PlayCircleOutlined />} onClick={() => void handleRunCheck()} disabled={isReadOnly || saving || validating || hasTestDataErrors || shouldBlockSelectedCaseRun}>
                         Run check
                       </Button>
                 </Space>
@@ -1184,8 +1463,8 @@ export default function TestEditorPage() {
               {exportTrigger}
             </Space>
             <Space wrap>
-              <Button onClick={handleValidateAndSave} loading={saving || validating} disabled={isReadOnly || !isDirty || saving || validating}>
-                Save changes
+              <Button onClick={handleValidateAndSave} loading={saving || validating} disabled={isReadOnly || !isDirty || saving || validating || hasTestDataErrors || shouldBlockRunAllCases}>
+                {isEdit ? 'Save changes' : 'Create check'}
               </Button>
             </Space>
           </Space>

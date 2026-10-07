@@ -1,4 +1,6 @@
 export type RunStatus = 'PENDING' | 'RUNNING' | 'PASSED' | 'FAILED';
+export type RunMode = 'NORMAL' | 'AUTH_REFRESH';
+export type AuthStateStatus = 'UNAVAILABLE' | 'REFRESHING' | 'AVAILABLE' | 'REFRESH_FAILED';
 
 export type StepAction =
   | 'goto'
@@ -39,6 +41,12 @@ export interface StepValidationResult {
   resolvedCount?: number;
   suggestion?: string;
   error?: string;
+}
+
+export interface TestDataCase {
+  name: string;
+  enabled: boolean;
+  variables: Record<string, string>;
 }
 
 export interface ValidationReport {
@@ -261,6 +269,23 @@ export interface Environment {
   updatedAt: string;
 }
 
+export interface ProjectAuthProfile {
+  id: string;
+  projectId: string;
+  environmentId: string;
+  authCheckId: string;
+  enabled: boolean;
+  status: AuthStateStatus;
+  refreshedAt?: string | null;
+  refreshedRunId?: string | null;
+  lastError?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  hasUsableState: boolean;
+  environment: Pick<Environment, 'id' | 'name'>;
+  authCheck: Pick<Test, 'id' | 'name'>;
+}
+
 export type NotificationChannelType = 'telegram' | 'slack';
 
 export interface NotificationChannel {
@@ -337,7 +362,9 @@ export interface Test {
   url: string;
   device?: string | null;
   environmentId?: string | null;
+  useProjectAuthentication: boolean;
   steps: Step[];
+  testData: TestDataCase[];
   projectId: string;
   createdAt: string;
   _count?: { runs: number };
@@ -346,12 +373,16 @@ export interface Test {
 export interface TestRun {
   id: string;
   status: RunStatus;
+  runMode?: RunMode;
   startedAt: string;
   finishedAt?: string;
   durationMs?: number;
   error?: string;
   tracePath?: string;
   traceUnavailableReason?: string | null;
+  dataCaseName?: string | null;
+  dataCaseIndex?: number | null;
+  dataCaseVariables?: Record<string, string> | null;
   trace?: {
     available: boolean;
     downloadUrl?: string;
@@ -377,4 +408,37 @@ export interface TestRun {
   }) | null;
   environment?: Environment | null;
   schedule?: Schedule | null;
+}
+
+export interface TestRunBatch {
+  id: string;
+  status: RunStatus;
+  totalCases: number;
+  completedCases: number;
+  passedCases: number;
+  failedCases: number;
+  startedAt: string;
+  finishedAt?: string | null;
+  test: {
+    id: string;
+    name: string;
+    projectId: string;
+  };
+  environment?: {
+    id: string;
+    name: string;
+  } | null;
+  runs: Array<{
+    id: string;
+    status: RunStatus;
+    dataCaseName?: string | null;
+    dataCaseIndex?: number | null;
+    batchOrder?: number | null;
+    durationMs?: number | null;
+    error?: string | null;
+    startedAt: string;
+    finishedAt?: string | null;
+    currentStep?: number | null;
+    totalSteps?: number | null;
+  }>;
 }
